@@ -23,6 +23,7 @@ args = getResolvedOptions(
     [
         "JOB_NAME",
         "bkt_name",
+        "appflow_bckt",
         "folder_path",
         "mf_secret",
         "state_ref_folder_path",
@@ -39,19 +40,16 @@ job.init(args["JOB_NAME"], args)
 # Required args
 mf_secret = args["mf_secret"]
 bkt_name = args["bkt_name"]
+appflow_bckt = args["appflow_bckt"]
 folder_path = args["folder_path"]
 state_ref_folder_path = args["state_ref_folder_path"]
 country_ref_folder_path = args["country_ref_folder_path"]
 
 # Optional args for SIF-specific behavior.
-appflow_bckt = get_optional_arg("appflow_bckt", "")
 sif_appflow_bckt = get_optional_arg("sif_appflow_bckt", appflow_bckt)
 sif_folder_path = get_optional_arg("sif_folder_path", folder_path)
 sif_appflow_folder_path = get_optional_arg("sif_appflow_folder_path", sif_folder_path)
 source_schema = get_optional_arg("source_schema", "SIFIFSP")
-enable_appflow_write = (
-    get_optional_arg("enable_appflow_write", "N").strip().upper() == "Y"
-)
 
 ist = dateutil.tz.gettz("Asia/Kolkata")
 currdt = (datetime.now(tz=ist) - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -70,8 +68,7 @@ print(
     "Runtime paths -> "
     f"source schema: {source_schema}, "
     f"SIF folder: {sif_folder_path}, "
-    f"AppFlow enabled: {enable_appflow_write}, "
-    f"SIF AppFlow bucket: {sif_appflow_bckt or 'NA'}"
+    f"SIF AppFlow bucket: {sif_appflow_bckt}"
 )
 
 
@@ -207,7 +204,6 @@ def compute_incrementals(
     base_folder,
     appflow_bucket,
     appflow_folder,
-    enable_appflow_write,
 ):
     print(f"Computing incrementals for {entity_name}")
     print(f"Previous filepath: {prev_filepath}")
@@ -222,14 +218,8 @@ def compute_incrementals(
     inc_path = f"{base_folder}/inc/{entity_name}/rundate={currdt}/"
     write_csv(inc_df, data_bucket, inc_path)
 
-    if enable_appflow_write and appflow_bucket:
-        appflow_path = f"{appflow_folder}/{entity_name}/"
-        write_appflow_file(inc_df, appflow_bucket, appflow_path)
-    else:
-        print(
-            f"Skipping AppFlow write for {entity_name}. "
-            "Set --enable_appflow_write Y to enable."
-        )
+    appflow_path = f"{appflow_folder}/{entity_name}/"
+    write_appflow_file(inc_df, appflow_bucket, appflow_path)
 
     if inc_df.count() > 0:
         print(f"Incrementals written for {entity_name}")
@@ -399,14 +389,13 @@ print("Reference views created.")
 cp_child_sif_df = build_cp_child_df(product_type="SIF", source_suffix="SIF", sif_only=True)
 
 entity_map = {
-    "SF_CP_CHILD_SIF": {
+    "SF_CP_CHILD": {
         "df": cp_child_sif_df,
         "pkeys": ["Source_System_Id__c"],
         "bucket": bkt_name,
         "base_folder": sif_folder_path,
         "appflow_bucket": sif_appflow_bckt,
         "appflow_folder": sif_appflow_folder_path,
-        "enable_appflow_write": enable_appflow_write,
     },
 }
 
@@ -436,7 +425,6 @@ for entity_name, config in entity_map.items():
         base_folder=config["base_folder"],
         appflow_bucket=config["appflow_bucket"],
         appflow_folder=config["appflow_folder"],
-        enable_appflow_write=config["enable_appflow_write"],
     )
 
 job.commit()
