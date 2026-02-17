@@ -273,7 +273,7 @@ def build_cp_child_df(product_type, source_suffix, sif_only):
             bm.broker_code AS ARN_Code__c,
             '' AS Alternate_Online_Code__c,
             bm.pan_no AS PAN,
-            DATE_FORMAT(bm.arn_exp, 'yyyy-MM-dd') AS ARN_Expiry_Date__c,
+            DATE_FORMAT(bm.arn_exp, 'yyyy/MM/dd') AS ARN_Expiry_Date__c,
             '' AS OwnerId,
             '{product_type}' AS Product_Type__c,
             CASE
@@ -284,7 +284,7 @@ def build_cp_child_df(product_type, source_suffix, sif_only):
                 WHEN bm.broker_code LIKE 'INB%' THEN 'RIA'
                 WHEN bm.broker_code LIKE 'EOP%' THEN 'RIA'
                 ELSE ''
-            END AS CP_type__C,
+            END AS CP_Type__c,
             '' AS CP_Presence__c,
             '' AS DOB_Date_of_Inc__c,
             '' AS CP_Zone__c,
@@ -296,7 +296,8 @@ def build_cp_child_df(product_type, source_suffix, sif_only):
             bb.bankacno AS Bank_Account_Number__c,
             bb.bankacno AS Confirm_Bank_Account_Number__c,
             'INR' AS Invoice_Currency__c,
-            '' AS GST_Number__c,
+            COALESCE(bgm.GSTIN, '') AS GST_Number__c,
+            bb.bankbranch AS GST_Branch__c,
             bb.bankbranch AS Bank_Branch__c,
             bb.ifcsc AS Bank_IFSC_Code__c,
             CASE
@@ -322,6 +323,8 @@ def build_cp_child_df(product_type, source_suffix, sif_only):
         FROM BROKER_MASTER bm
         LEFT JOIN BROKER_BANKS bb
             ON bm.Broker_code = bb.Brokcode
+        LEFT JOIN BROKER_GST_MASTER bgm
+            ON bm.Broker_code = bgm.Brokcode
         LEFT JOIN state_df s
             ON UPPER(TRIM(s.DB_STATE)) = UPPER(TRIM(bm.state_code))
         LEFT JOIN cntry_df c
@@ -360,10 +363,12 @@ print("CAMS channel partner incremental job started")
 
 broker_master_df = create_df('"STIIFL"."BROKER_MASTER"', "MF")
 broker_banks_df = create_df('"STIIFL"."BROKER_BANKS"', "MF")
+broker_gst_master_df = create_df('"STIIFL"."BROKER_GST_MASTER"', "MF")
 processed_trxns_df = create_df('"STIIFL"."PROCESSED_TRXNS"', "MF")
 
 broker_master_df.createOrReplaceTempView("BROKER_MASTER")
 broker_banks_df.createOrReplaceTempView("BROKER_BANKS")
+broker_gst_master_df.createOrReplaceTempView("BROKER_GST_MASTER")
 processed_trxns_df.createOrReplaceTempView("PROCESSED_TRXNS")
 
 cntry_df = (
