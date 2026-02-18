@@ -307,7 +307,7 @@ def build_cp_child_df(product_type, source_suffix, sif_only):
                 WHEN bb.bank_actype IN ('CA') THEN 'Current'
                 ELSE bb.bank_actype
             END AS Bank_Account_Type__c,
-            CONCAT_WS(' ', bb.NOMINEE_FIRST_NAME, bb.NOMINEE_MIDDLE_NAME, bb.NOMINEE_LAST_NAME)
+            CONCAT_WS(' ', bm.NOMINEE_FIRST_NAME, bm.NOMINEE_MIDDLE_NAME, bm.NOMINEE_LAST_NAME)
                 AS Name_of_Nominee__c,
             '' AS Relationship_with_Nominee__c,
             'Not Processed' AS Status,
