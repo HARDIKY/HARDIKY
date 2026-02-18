@@ -48,7 +48,8 @@ country_ref_folder_path = args["country_ref_folder_path"]
 # Optional args for SIF-specific behavior.
 sif_appflow_bckt = get_optional_arg("sif_appflow_bckt", appflow_bckt)
 sif_folder_path = get_optional_arg("sif_folder_path", folder_path)
-sif_appflow_folder_path = get_optional_arg("sif_appflow_folder_path", sif_folder_path)
+sif_appflow_folder_path = get_optional_arg("sif_appflow_folder_path", "SF")
+sif_entity_name = get_optional_arg("sif_entity_name", "SF_SIF_CP_CHILD")
 source_schema = get_optional_arg("source_schema", "SIFIFSP")
 
 ist = dateutil.tz.gettz("Asia/Kolkata")
@@ -59,16 +60,22 @@ secrets_client = boto3.client("secretsmanager")
 print("Retrieving connection details...")
 secret_response = secrets_client.get_secret_value(SecretId=mf_secret)
 pg = json.loads(secret_response["SecretString"])
-pg_url = pg["pg_url"]
-pg_user = pg["pg_user"]
-pg_password = pg["pg_password"]
+pg_url = pg.get("pg_url") or pg.get("jdbc_url") or pg.get("url")
+pg_user = pg.get("pg_user") or pg.get("username") or pg.get("user")
+pg_password = pg.get("pg_password") or pg.get("password")
+if not pg_url or not pg_user or not pg_password:
+    raise ValueError(
+        "Secret is missing DB fields. Expected keys like "
+        "pg_url/pg_user/pg_password or jdbc_url/username/password."
+    )
 print("Connection details from Secrets Manager retrieved.")
 
 print(
     "Runtime paths -> "
     f"source schema: {source_schema}, "
     f"SIF folder: {sif_folder_path}, "
-    f"SIF AppFlow bucket: {sif_appflow_bckt}"
+    f"SIF AppFlow bucket: {sif_appflow_bckt}, "
+    f"SIF AppFlow prefix: {sif_appflow_folder_path}/{sif_entity_name}/"
 )
 
 
@@ -389,7 +396,7 @@ print("Reference views created.")
 cp_child_sif_df = build_cp_child_df(product_type="SIF", source_suffix="SIF", sif_only=True)
 
 entity_map = {
-    "SF_CP_CHILD": {
+    sif_entity_name: {
         "df": cp_child_sif_df,
         "pkeys": ["Source_System_Id__c"],
         "bucket": bkt_name,
