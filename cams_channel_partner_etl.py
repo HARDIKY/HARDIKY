@@ -26,6 +26,7 @@ args = getResolvedOptions(
         "appflow_bckt",
         "folder_path",
         "mf_secret",
+        "sif_secret",
         "state_ref_folder_path",
         "country_ref_folder_path",
     ],
@@ -39,43 +40,77 @@ job.init(args["JOB_NAME"], args)
 
 # Required args
 mf_secret = args["mf_secret"]
+sif_secret = args["sif_secret"]
 bkt_name = args["bkt_name"]
 appflow_bckt = args["appflow_bckt"]
 folder_path = args["folder_path"]
 state_ref_folder_path = args["state_ref_folder_path"]
 country_ref_folder_path = args["country_ref_folder_path"]
 
-# Optional args for SIF-specific behavior.
-sif_appflow_bckt = get_optional_arg("sif_appflow_bckt", appflow_bckt)
+# Optional args for MF and SIF specific behavior.
+source_schema_mf = get_optional_arg("source_schema_mf", "STIIFL")
+source_schema_sif = get_optional_arg("source_schema_sif", "SIFIFSP")
+
+mf_folder_path = get_optional_arg("mf_folder_path", folder_path)
 sif_folder_path = get_optional_arg("sif_folder_path", folder_path)
+
+mf_appflow_bckt = get_optional_arg("mf_appflow_bckt", appflow_bckt)
+sif_appflow_bckt = get_optional_arg("sif_appflow_bckt", appflow_bckt)
+mf_appflow_folder_path = get_optional_arg("mf_appflow_folder_path", "SF")
 sif_appflow_folder_path = get_optional_arg("sif_appflow_folder_path", "SF")
+
+mf_entity_name = get_optional_arg("mf_entity_name", "SF_CP_CHILD")
 sif_entity_name = get_optional_arg("sif_entity_name", "SF_SIF_CP_CHILD")
-source_schema = get_optional_arg("source_schema", "SIFIFSP")
+
+if mf_entity_name == sif_entity_name:
+    raise ValueError("mf_entity_name and sif_entity_name must be different.")
 
 ist = dateutil.tz.gettz("Asia/Kolkata")
 currdt = (datetime.now(tz=ist) - timedelta(days=1)).strftime("%Y-%m-%d")
 s3 = boto3.client("s3")
 secrets_client = boto3.client("secretsmanager")
 
-print("Retrieving connection details...")
-secret_response = secrets_client.get_secret_value(SecretId=mf_secret)
-pg = json.loads(secret_response["SecretString"])
-pg_url = pg.get("pg_url") or pg.get("jdbc_url") or pg.get("url")
-pg_user = pg.get("pg_user") or pg.get("username") or pg.get("user")
-pg_password = pg.get("pg_password") or pg.get("password")
-if not pg_url or not pg_user or not pg_password:
-    raise ValueError(
-        "Secret is missing DB fields. Expected keys like "
-        "pg_url/pg_user/pg_password or jdbc_url/username/password."
+
+def get_connection_details(secret_id, label):
+    print(f"Retrieving connection details for {label}...")
+    secret_response = secrets_client.get_secret_value(SecretId=secret_id)
+    secret_payload = json.loads(secret_response["SecretString"])
+    jdbc_url = (
+        secret_payload.get("pg_url")
+        or secret_payload.get("jdbc_url")
+        or secret_payload.get("url")
     )
-print("Connection details from Secrets Manager retrieved.")
+    username = (
+        secret_payload.get("pg_user")
+        or secret_payload.get("username")
+        or secret_payload.get("user")
+    )
+    password = secret_payload.get("pg_password") or secret_payload.get("password")
+
+    if not jdbc_url or not username or not password:
+        raise ValueError(
+            f"{label} secret is missing DB fields. "
+            "Expected keys like pg_url/pg_user/pg_password or "
+            "jdbc_url/username/password."
+        )
+
+    print(f"Connection details retrieved for {label}.")
+    return {
+        "url": jdbc_url,
+        "user": username,
+        "password": password,
+    }
+
+
+mf_conn = get_connection_details(mf_secret, "MF")
+sif_conn = get_connection_details(sif_secret, "SIF")
 
 print(
-    "Runtime paths -> "
-    f"source schema: {source_schema}, "
-    f"SIF folder: {sif_folder_path}, "
-    f"SIF AppFlow bucket: {sif_appflow_bckt}, "
-    f"SIF AppFlow prefix: {sif_appflow_folder_path}/{sif_entity_name}/"
+    "Runtime config -> "
+    f"MF schema: {source_schema_mf}, SIF schema: {source_schema_sif}, "
+    f"MF folder: {mf_folder_path}, SIF folder: {sif_folder_path}, "
+    f"MF AppFlow path: s3://{mf_appflow_bckt}/{mf_appflow_folder_path}/{mf_entity_name}/, "
+    f"SIF AppFlow path: s3://{sif_appflow_bckt}/{sif_appflow_folder_path}/{sif_entity_name}/"
 )
 
 
@@ -91,20 +126,23 @@ def read_csv(path, bucket):
     )
 
 
-def create_df(table_name):
-    print(f"Connecting for table {table_name}")
+def create_df(table_name, business_name, connection_details):
+    print(f"Connecting to {business_name} for table {table_name}")
     try:
         return (
             spark.read.format("jdbc")
-            .option("url", pg_url)
-            .option("user", pg_user)
-            .option("password", pg_password)
+            .option("url", connection_details["url"])
+            .option("user", connection_details["user"])
+            .option("password", connection_details["password"])
             .option("dbtable", table_name)
             .option("driver", "org.postgresql.Driver")
             .load()
         )
     except Exception as e:
-        print(f"Error: JDBC connection issue for table {table_name}: {e}")
+        print(
+            f"Error: JDBC connection issue for {business_name} "
+            f"table {table_name}: {e}"
+        )
         raise
 
 
@@ -177,20 +215,18 @@ def get_delta(prev_df, curr_df, pkey):
 
 
 def get_prev_file(entity_name, bucket, base_folder):
-    dates = []
+    dates = set()
     fullload_path = f"{base_folder}/fl/{entity_name}/"
-    date_contents = s3.list_objects_v2(Bucket=bucket, Prefix=fullload_path)
+    paginator = s3.get_paginator("list_objects_v2")
 
-    if "Contents" not in date_contents:
-        print(f"Folder for entity {entity_name} does not exist.")
-        return 0
+    for page in paginator.paginate(Bucket=bucket, Prefix=fullload_path):
+        for value in page.get("Contents", []):
+            key = value["Key"]
+            if key.endswith(".csv"):
+                run_date_folder = key.split("/")[-2]
+                dates.add(run_date_folder)
 
-    for value in date_contents["Contents"]:
-        if ".csv" in value["Key"]:
-            run_date_folder = value["Key"].split("/")[-2]
-            dates.append(run_date_folder)
-
-    dates.sort(reverse=True)
+    dates = sorted(list(dates), reverse=True)
     if len(dates) > 0 and dates[0] != f"rundate={currdt}":
         prev_path = f"{base_folder}/fl/{entity_name}/{dates[0]}/"
         print(f"Previous file path: {prev_path}")
@@ -199,6 +235,7 @@ def get_prev_file(entity_name, bucket, base_folder):
         prev_path = f"{base_folder}/fl/{entity_name}/{dates[1]}/"
         print(f"Previous file path: {prev_path}")
         return prev_path
+    print(f"No previous file found for {entity_name}")
     return 0
 
 
@@ -228,16 +265,36 @@ def compute_incrementals(
     appflow_path = f"{appflow_folder}/{entity_name}/"
     write_appflow_file(inc_df, appflow_bucket, appflow_path)
 
-    if inc_df.count() > 0:
-        print(f"Incrementals written for {entity_name}")
+    inc_count = inc_df.count()
+    if inc_count > 0:
+        print(f"Incrementals written for {entity_name}: {inc_count}")
     else:
         print(f"No incrementals to write for {entity_name}")
 
 
-def build_cp_child_df(product_type, source_suffix, sif_only):
+def register_business_tables(prefix, source_schema, connection_details, business_name):
+    table_names = [
+        "BROKER_MASTER",
+        "BROKER_BANKS",
+        "BROKER_GST_MASTER",
+        "PROCESSED_TRXNS",
+    ]
+    for table_name in table_names:
+        full_table_name = f'"{source_schema}"."{table_name}"'
+        table_df = create_df(full_table_name, business_name, connection_details)
+        table_df.createOrReplaceTempView(f"{prefix}_{table_name}")
+    print(f"Views created for {business_name}.")
+
+
+def build_cp_child_df(prefix, product_type, source_suffix, sif_only):
     sif_filter_clause = ""
     if sif_only:
         sif_filter_clause = "AND COALESCE(TRIM(bm.sif_enabled_flag), 'N') = 'Y'"
+
+    broker_master_view = f"{prefix}_BROKER_MASTER"
+    broker_banks_view = f"{prefix}_BROKER_BANKS"
+    broker_gst_view = f"{prefix}_BROKER_GST_MASTER"
+    processed_trxns_view = f"{prefix}_PROCESSED_TRXNS"
 
     query = f"""
     SELECT CONCAT(ARN_Code__c, '-{source_suffix}') AS Source_System_Id__c, *
@@ -321,8 +378,8 @@ def build_cp_child_df(product_type, source_suffix, sif_only):
                 ELSE 'Not Empanelled'
             END AS Empanelment_Status__c,
             DATE_FORMAT(pt.last_trxn_date, 'yyyy-MM-dd') AS Transaction_Date__c
-        FROM BROKER_MASTER bm
-        LEFT JOIN BROKER_BANKS bb
+        FROM {broker_master_view} bm
+        LEFT JOIN {broker_banks_view} bb
             ON bm.Broker_code = bb.Brokcode
         LEFT JOIN (
             SELECT
@@ -336,7 +393,7 @@ def build_cp_child_df(product_type, source_suffix, sif_only):
                         PARTITION BY ARN
                         ORDER BY TIME_STAMP DESC, COMMIT_SCN DESC
                     ) AS rn
-                FROM BROKER_GST_MASTER
+                FROM {broker_gst_view}
             ) gst_latest
             WHERE rn = 1
         ) bgm
@@ -349,7 +406,7 @@ def build_cp_child_df(product_type, source_suffix, sif_only):
             SELECT
                 Broker_code,
                 MAX(trxn_date) AS last_trxn_date
-            FROM PROCESSED_TRXNS
+            FROM {processed_trxns_view}
             GROUP BY Broker_code
             HAVING MAX(trxn_date) IS NOT NULL
         ) pt
@@ -375,17 +432,7 @@ def build_cp_child_df(product_type, source_suffix, sif_only):
     return spark.sql(query)
 
 
-print("CAMS SIF channel partner incremental job started")
-
-broker_master_df = create_df(f'"{source_schema}"."BROKER_MASTER"')
-broker_banks_df = create_df(f'"{source_schema}"."BROKER_BANKS"')
-broker_gst_master_df = create_df(f'"{source_schema}"."BROKER_GST_MASTER"')
-processed_trxns_df = create_df(f'"{source_schema}"."PROCESSED_TRXNS"')
-
-broker_master_df.createOrReplaceTempView("BROKER_MASTER")
-broker_banks_df.createOrReplaceTempView("BROKER_BANKS")
-broker_gst_master_df.createOrReplaceTempView("BROKER_GST_MASTER")
-processed_trxns_df.createOrReplaceTempView("PROCESSED_TRXNS")
+print("CAMS channel partner incremental job started for MF + SIF")
 
 cntry_df = (
     spark.read.option("header", "true")
@@ -403,14 +450,39 @@ state_df = (
     .option("delimiter", ",")
     .csv(state_ref_folder_path)
 )
-
 cntry_df.createOrReplaceTempView("cntry_df")
 state_df.createOrReplaceTempView("state_df")
 print("Reference views created.")
 
-cp_child_sif_df = build_cp_child_df(product_type="SIF", source_suffix="SIF", sif_only=True)
+register_business_tables(
+    prefix="MF",
+    source_schema=source_schema_mf,
+    connection_details=mf_conn,
+    business_name="MF",
+)
+register_business_tables(
+    prefix="SIF",
+    source_schema=source_schema_sif,
+    connection_details=sif_conn,
+    business_name="SIF",
+)
+
+cp_child_mf_df = build_cp_child_df(
+    prefix="MF", product_type="MF", source_suffix="MF", sif_only=False
+)
+cp_child_sif_df = build_cp_child_df(
+    prefix="SIF", product_type="SIF", source_suffix="SIF", sif_only=True
+)
 
 entity_map = {
+    mf_entity_name: {
+        "df": cp_child_mf_df,
+        "pkeys": ["Source_System_Id__c"],
+        "bucket": bkt_name,
+        "base_folder": mf_folder_path,
+        "appflow_bucket": mf_appflow_bckt,
+        "appflow_folder": mf_appflow_folder_path,
+    },
     sif_entity_name: {
         "df": cp_child_sif_df,
         "pkeys": ["Source_System_Id__c"],
@@ -425,9 +497,6 @@ for entity_name, config in entity_map.items():
     data_bucket = config["bucket"]
     print(f"Searching previous file for {entity_name}")
     prev_filepath = get_prev_file(entity_name, data_bucket, config["base_folder"])
-    if prev_filepath == 0:
-        print(f"No previous full load file for {entity_name}")
-
     curr_filepath = f"{config['base_folder']}/fl/{entity_name}/rundate={currdt}/"
     print(f"Current filepath: {curr_filepath}")
 
