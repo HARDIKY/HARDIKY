@@ -324,8 +324,23 @@ def build_cp_child_df(product_type, source_suffix, sif_only):
         FROM BROKER_MASTER bm
         LEFT JOIN BROKER_BANKS bb
             ON bm.Broker_code = bb.Brokcode
-        LEFT JOIN BROKER_GST_MASTER bgm
-            ON bm.Broker_code = bgm.Brokcode
+        LEFT JOIN (
+            SELECT
+                ARN,
+                GSTIN
+            FROM (
+                SELECT
+                    ARN,
+                    GSTIN,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ARN
+                        ORDER BY TIME_STAMP DESC, COMMIT_SCN DESC
+                    ) AS rn
+                FROM BROKER_GST_MASTER
+            ) gst_latest
+            WHERE rn = 1
+        ) bgm
+            ON UPPER(TRIM(bm.Broker_code)) = UPPER(TRIM(bgm.ARN))
         LEFT JOIN state_df s
             ON UPPER(TRIM(s.DB_STATE)) = UPPER(TRIM(bm.state_code))
         LEFT JOIN cntry_df c
